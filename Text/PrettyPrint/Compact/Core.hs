@@ -11,7 +11,10 @@ module Text.PrettyPrint.Compact.Core
        , groupingBy
        , ODoc
        , Doc
+       , Doc'
        , LM
+       , M
+       , Pair
        , ($$)
        ) where
 
@@ -96,6 +99,10 @@ renderWithL opts (L xs) = renderWithList opts (toList xs)
 renderWithLM :: (Monoid a, Monoid r) => Options a r -> LM a -> r
 renderWithLM opts x = renderWithList opts (lmToList x)
 
+{-# INLINE renderWithL' #-}
+renderWithL' :: (Monoid a, Monoid r) => Options a r -> L' a -> r
+renderWithL' opts x = renderWithList opts (lToList x)
+
 data Options a r = Options
     { optsPageWidth :: !Int              -- ^ maximum page width
     , optsAnnotate  :: a -> String -> r  -- ^ how to annotate the string. /Note:/ the annotation should preserve the visible length of the string.
@@ -125,6 +132,11 @@ data M a = M {height    :: Int,
 data Tree a = Leaf | Node !(Tree a) a !(Tree a)
   deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
 
+data L' a = L'
+  { _block' :: Maybe (AS a, Tree (AS a))
+  , _last'  :: AS a
+  }
+
 data LM a = LM
   { _height    :: !Int
   , _lastWidth :: !Int
@@ -133,11 +145,20 @@ data LM a = LM
   , _last      :: AS a
   } deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
 
+{-# INLINE lmToList #-}
 lmToList :: LM a -> [AS a]
 lmToList x = case _block x of
   Nothing       -> [_last x]
   Just (hd, tl) -> hd : toList (Node tl (_last x) Leaf)
 
+{-# INLINE lToList #-}
+lToList :: L' a -> [AS a]
+lToList (L' b l) = case b of
+  Nothing       -> [l]
+  Just (hd, tl) -> hd : toList (Node tl l Leaf)
+
+
+{-# INLINE mkBlock #-}
 mkBlock :: Maybe (a, Tree a) -> a -> Tree a -> Maybe (a, Tree a)
 mkBlock Nothing        y ys = Just (y, ys)
 mkBlock (Just (x, xs)) y ys = Just (x, Node xs y ys)
@@ -159,6 +180,17 @@ instance Monoid a => Semigroup (LM a) where
                                   (fmap (indent <>) tl)
                         , indent <> _last b)
 
+instance Monoid a => Semigroup (L' a) where
+  a <> b = L' block last where
+
+    indent = mkAS (P.replicate (length $ _last' a) ' ')
+    (block, last) = case _block' b of
+      Nothing        -> ( _block' a
+                        , _last' a <> _last' b)
+      Just (hd , tl) -> ( mkBlock (_block' a) (_last' a <> hd)
+                                  (fmap (indent <>) tl)
+                        , indent <> _last' b)
+
 instance Semigroup (M a) where
   a <> b =
     M {maxWidth = max (maxWidth a) (maxWidth b + lastWidth a),
@@ -166,6 +198,10 @@ instance Semigroup (M a) where
        lastWidth = lastWidth a + lastWidth b}
 
 instance Monoid a => Monoid (LM a) where
+  mempty = text ""
+  mappend = (<>)
+
+instance Monoid a => Monoid (L' a) where
   mempty = text ""
   mappend = (<>)
 
@@ -190,6 +226,14 @@ instance Layout LM where
     x { _block = fmap (\(a,b) -> (ann a, fmap ann b)) (_block x)
       , _last  = _last x
       }
+
+instance Layout L' where
+  text s = L' Nothing (mkAS s)
+  flush (L' b l) = L' (mkBlock b l Leaf) (mkAS "")
+  annotate a (L' b l) = let ann = annotateAS a in
+    L' { _block' = fmap (\(a,b) -> (ann a, fmap ann b)) b
+       , _last'  = l
+       }
 
 instance Layout M where
   text s = M {height = 0, maxWidth = length s, lastWidth = length s}
@@ -292,7 +336,10 @@ instance (Measurable (d a) b, WithSizes b, Renderable d a) =>
 instance Renderable L a where
   renderWith = renderWithL
 
-instance Renderable (Pair M L) a where
+instance Renderable L' a where
+  renderWith = renderWithL'
+
+instance Renderable l a => Renderable (Pair M l) a where
   renderWith opts = renderWith opts . scnd
 
 instance Renderable LM a where
@@ -316,7 +363,7 @@ instance WithSizes (M a) where
   theWidth  = maxWidth
   theHeight = height
 
-instance Measurable (Pair M L a) (M a) where
+instance Measurable (Pair M l a) (M a) where
   measure = frst
 
 instance WithSizes (LM a) where
@@ -326,6 +373,8 @@ instance WithSizes (LM a) where
 instance Measurable (LM a) (LM a) where
   measure = id
 
+{-# SPECIALISE groupingBy :: (Monoid a, Ord a) => String -> [(Int, Doc a)] -> Doc a #-}
+{-# SPECIALISE groupingBy :: (Monoid a, Ord a) => String -> [(Int, Doc' a)] -> Doc' a #-}
 groupingBy :: Document d a b => String -> [(Int,ODoc d a)] -> ODoc d a
 groupingBy _ [] = mempty
 groupingBy separator ms = MkDoc $ \w ->
@@ -354,7 +403,9 @@ instance Monoid a => IsString (Doc a) where
   fromString = text
 
 type Annotation a = (Monoid a)
-type Doc a = ODoc (Pair M L) a
+type LDoc l a = ODoc (Pair M l) a
+type Doc a = LDoc L a
+type Doc' a = LDoc L' a
 
 -- tt :: Doc ()
 -- tt = groupingBy " " $ map (4,) $ 
@@ -373,5 +424,5 @@ class ( Layout d, Measurable (d a) b, WithSizes b
       ) => Document d a b
       | d a -> b
 
-instance (Monoid a, Ord a) => Document (Pair M L) a (M a)
+instance (Monoid a, Ord a, Semigroup (l a), Layout l) => Document (Pair M l) a (M a)
 instance (Monoid a, Ord a) => Document LM a (LM a)

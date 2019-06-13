@@ -65,8 +65,13 @@ module Text.PrettyPrint.Compact (
    -- * Documents
    ODoc,
    Doc,
+   Doc',
    LM,
+   M,
+   Pair(..),
    Renderable,
+   Layout,
+   Document,
 
    -- * Basic combinators
    module Data.Monoid, text, flush, char,

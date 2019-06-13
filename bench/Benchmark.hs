@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+
 module Main (main) where
 
 import Prelude ()
@@ -18,15 +20,26 @@ import qualified Text.PrettyPrint.Compact  as PC
 import qualified Text.PrettyPrint.HughesPJ as HPJ
 import qualified Text.PrettyPrint.Leijen   as WL
 
+{-# SPECIALISE prettiestJSON' :: Value -> PC.Doc () #-}
+{-# SPECIALISE prettiestJSON' :: Value -> PC.Doc' () #-}
+prettiestJSON' :: ( Semigroup (l ()), PC.Layout l)
+               => Value -> PC.ODoc (PC.Pair PC.M l) ()
+prettiestJSON' (Bool True)  = PC.text "true"
+prettiestJSON' (Bool False) = PC.text "false"
+prettiestJSON' (Object o)   = PC.encloseSep (PC.text "{") (PC.text "}") (PC.text ",") (map prettyKV $ H.toList o)
+  where prettyKV (k,v)     = PC.text (show k) PC.<> PC.text ":" PC.<+> prettiestJSON' v
+prettiestJSON' (String s)   = PC.string (show s)
+prettiestJSON' (Array a)    = PC.encloseSep (PC.text "[") (PC.text "]") (PC.text ",") (map prettiestJSON' $ toList a)
+prettiestJSON' Null         = PC.mempty
+prettiestJSON' (Number n)   = PC.text (show n)
+
+{-# INLINE prettiestJSON #-}
 prettiestJSON :: Value -> PC.Doc ()
-prettiestJSON (Bool True)  = PC.text "true"
-prettiestJSON (Bool False) = PC.text "false"
-prettiestJSON (Object o)   = PC.encloseSep (PC.text "{") (PC.text "}") (PC.text ",") (map prettyKV $ H.toList o)
-  where prettyKV (k,v)     = PC.text (show k) PC.<> PC.text ":" PC.<+> prettiestJSON v
-prettiestJSON (String s)   = PC.string (show s)
-prettiestJSON (Array a)    = PC.encloseSep (PC.text "[") (PC.text "]") (PC.text ",") (map prettiestJSON $ toList a)
-prettiestJSON Null         = PC.mempty
-prettiestJSON (Number n)   = PC.text (show n)
+prettiestJSON = prettiestJSON'
+
+{-# INLINE prettiestLJSON #-}
+prettiestLJSON :: Value -> PC.Doc' ()
+prettiestLJSON = prettiestJSON'
 
 {-# INLINE pcRenderText #-}
 pcRenderText :: (PC.Renderable d a, Monoid a) => d a -> TL.Text
@@ -84,6 +97,7 @@ main = do
     C.defaultMain
         [ C.bgroup "small"
             [ C.bench "pretty-compact" $ C.nf (PC.render . prettiestJSON) smallValue
+            , C.bench "pretty-compact Safe" $ C.nf (PC.render . prettiestLJSON) smallValue
             , C.bench "pretty-compact Text" $ C.nf (pcRenderText . prettiestJSON) smallValue
             , C.bench "pretty-compact Fused" $ C.nf (PC.render . prettiestLMJSON) smallValue
             , C.bench "pretty"         $ C.nf (HPJ.render . hpjJSON) smallValue
@@ -91,6 +105,7 @@ main = do
             ]
         , C.bgroup "big"
             [ C.bench "pretty-compact" $ C.nf (PC.render . prettiestJSON) bigValue
+            , C.bench "pretty-compact Safe" $ C.nf (PC.render . prettiestLJSON) bigValue
             , C.bench "pretty-compact Text" $ C.nf (pcRenderText . prettiestJSON) bigValue
             , C.bench "pretty-compact Fused" $ C.nf (PC.render . prettiestLMJSON) bigValue
             , C.bench "pretty"         $ C.nf (HPJ.render . hpjJSON) bigValue
