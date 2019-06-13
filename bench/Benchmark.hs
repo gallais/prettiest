@@ -28,9 +28,21 @@ prettiestJSON (Array a)    = PC.encloseSep (PC.text "[") (PC.text "]") (PC.text 
 prettiestJSON Null         = PC.mempty
 prettiestJSON (Number n)   = PC.text (show n)
 
-pcRenderText :: Monoid a => PC.Doc a -> TL.Text
+{-# INLINE pcRenderText #-}
+pcRenderText :: (PC.Renderable d a, Monoid a) => d a -> TL.Text
 pcRenderText = TLB.toLazyText . PC.renderWith PC.defaultOptions
     { PC.optsAnnotate = \_ -> TLB.fromString }
+
+prettiestLMJSON :: Value -> PC.ODoc PC.LM ()
+prettiestLMJSON (Bool True)  = PC.text "true"
+prettiestLMJSON (Bool False) = PC.text "false"
+prettiestLMJSON (Object o)   = PC.encloseSep (PC.text "{") (PC.text "}") (PC.text ",") (map prettyKV $ H.toList o)
+  where prettyKV (k,v)     = PC.text (show k) PC.<> PC.text ":" PC.<+> prettiestLMJSON v
+prettiestLMJSON (String s)   = PC.string (show s)
+prettiestLMJSON (Array a)    = PC.encloseSep (PC.text "[") (PC.text "]") (PC.text ",") (map prettiestLMJSON $ toList a)
+prettiestLMJSON Null         = PC.mempty
+prettiestLMJSON (Number n)   = PC.text (show n)
+
 
 wlJSON :: Value -> WL.Doc
 wlJSON (Bool True)     = WL.text "true"
@@ -73,13 +85,15 @@ main = do
         [ C.bgroup "small"
             [ C.bench "pretty-compact" $ C.nf (PC.render . prettiestJSON) smallValue
             , C.bench "pretty-compact Text" $ C.nf (pcRenderText . prettiestJSON) smallValue
+            , C.bench "pretty-compact Fused" $ C.nf (PC.render . prettiestLMJSON) smallValue
             , C.bench "pretty"         $ C.nf (HPJ.render . hpjJSON) smallValue
             , C.bench "wl-pprint"      $ C.nf (wlRender . wlJSON) smallValue
             ]
         , C.bgroup "big"
             [ C.bench "pretty-compact" $ C.nf (PC.render . prettiestJSON) bigValue
             , C.bench "pretty-compact Text" $ C.nf (pcRenderText . prettiestJSON) bigValue
-            , C.bench "pretty"         $ C.nf (HPJ.render . hpjJSON) bigValue 
+            , C.bench "pretty-compact Fused" $ C.nf (PC.render . prettiestLMJSON) bigValue
+            , C.bench "pretty"         $ C.nf (HPJ.render . hpjJSON) bigValue
             , C.bench "wl-pprint"      $ C.nf (wlRender . wlJSON) bigValue
             ]
         ]

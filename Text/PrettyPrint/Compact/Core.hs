@@ -1,8 +1,19 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables, TypeSynonymInstances, FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving, ViewPatterns, DeriveFunctor, DeriveFoldable, DeriveTraversable, LambdaCase #-}
-module Text.PrettyPrint.Compact.Core(Annotation,Layout(..),renderWith,Options(..),groupingBy,Doc,($$)) where
+{-# LANGUAGE ScopedTypeVariables, TypeSynonymInstances, FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving, ViewPatterns, DeriveFunctor, DeriveFoldable, DeriveTraversable, LambdaCase, PatternGuards, MultiParamTypeClasses, FunctionalDependencies, UndecidableInstances #-}
+module Text.PrettyPrint.Compact.Core
+       ( Annotation
+       , Layout(..)
+       , Renderable(..)
+       , Document
+       , Options(..)
+       , groupingBy
+       , ODoc
+       , Doc
+       , LM
+       , ($$)
+       ) where
 
 import Prelude ()
 import Prelude.Compat as P
@@ -59,12 +70,13 @@ instance Monoid a => Monoid (L a) where
    mempty = L (singleton (mkAS ""))
    mappend = (<>)
 
+annotateAS :: Semigroup a => a -> AS a -> AS a
+annotateAS a = fmap (a <>)
+
 instance Layout L where
    text = L . singleton . mkAS
    flush (L xs) = L (xs |> mkAS "")
-   annotate a (L s') = L (fmap annotateAS s')
-      where annotateAS (AS i s) = AS i (fmap annotatePart s)
-            annotatePart (b, s) = (b `mappend` a, s)
+   annotate a (L s') = L (fmap (annotateAS a) s')
 
 renderWithL :: (Monoid a, Monoid r) => Options a r -> L a -> r
 renderWithL opts (L xs) = intercalate (toList xs)
@@ -102,15 +114,50 @@ data M a = M {height    :: Int,
               }
   deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
 
+data LM a = LM
+  { _height    :: !Int
+  , _lastWidth :: !Int
+  , _maxWidth  :: !Int
+  , _block     :: Seq (AS a)
+  } deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
+
+instance Monoid a => Semigroup (LM a) where
+  a <> b
+     | xs :> x <- viewr (_block a)
+     , y :< ys <- viewl (_block b)
+    = LM { _height    = _height a + _height b
+         , _lastWidth = _lastWidth a + _lastWidth b
+         , _maxWidth  = max (_maxWidth a) (_maxWidth b + _lastWidth a)
+         , _block     = xs <> singleton (x <> y) <> (fmap (indent <>) ys)
+         } where indent = mkAS (P.replicate (_lastWidth a) ' ')
+  _ <> _ = error "<> @LM: invariant violated, Seq is empty"
+
 instance Semigroup (M a) where
   a <> b =
     M {maxWidth = max (maxWidth a) (maxWidth b + lastWidth a),
        height = height a + height b,
        lastWidth = lastWidth a + lastWidth b}
 
+instance Monoid a => Monoid (LM a) where
+  mempty = text ""
+  mappend = (<>)
+
 instance Monoid a => Monoid (M a) where
   mempty = text ""
   mappend = (<>)
+
+instance Layout LM where
+  text s = LM { _height    = 0
+              , _maxWidth  = n
+              , _lastWidth = n
+              , _block     = singleton (mkAS s)
+              } where n = length s
+  flush x = LM { _height    = _height x + 1
+               , _maxWidth  = _maxWidth x
+               , _lastWidth = 0
+               , _block     = _block x |> mkAS ""
+               }
+  annotate a x = x { _block = fmap (annotateAS a) (_block x) }
 
 instance Layout M where
   text s = M {height = 0, maxWidth = length s, lastWidth = length s}
@@ -121,6 +168,8 @@ instance Layout M where
 class Poset a where
   (≺) :: a -> a -> Bool
 
+instance Poset (LM a) where
+  LM c1 l1 s1 _ ≺ LM c2 l2 s2 _ = c1 <= c2 && l1 <= l2 && s1 <= s2
 
 instance Poset (M a) where
   M c1 l1 s1 ≺ M c2 l2 s2 = c1 <= c2 && l1 <= l2 && s1 <= s2
@@ -138,10 +187,8 @@ mergeAllOn :: Ord b => (a -> b) -> [[a]] -> [a]
 mergeAllOn _ [] = []
 mergeAllOn m (x:xs) = mergeOn m x (mergeAllOn m xs)
 
-bestsOn :: forall a b. (Poset b, Ord b)
-      => (a -> b) -- ^ measure
-      -> [[a]] -> [a]
-bestsOn m = paretoOn' m [] . mergeAllOn m
+bestsOn :: forall a b. (Measurable a b, Poset b, Ord b) => [[a]] -> [a]
+bestsOn = paretoOn' m [] . mergeAllOn m where m = measure
 
 -- | @paretoOn m = paretoOn' m []@
 paretoOn' :: Poset b => (a -> b) -> [a] -> [a] -> [a]
@@ -155,44 +202,72 @@ paretoOn' m acc (x:xs) = if any ((≺ m x) . m) acc
 
 -- list sorted by lexicographic order for the first component
 -- function argument is the page width
-newtype ODoc a = MkDoc {fromDoc :: Int -> [(Pair M L a)]}
+data ODoc d a = MkDoc { fromDoc :: Int -> [d a] }
 
-instance Monoid a => Semigroup (ODoc a) where
-  MkDoc xs <> MkDoc ys = MkDoc $ \w -> bestsOn frst [ discardInvalid w [x <> y | y <- ys w] | x <- xs w]
+class Measurable t b | t -> b where
+  measure :: t -> b
 
-discardInvalid w = quasifilter (fits w . frst)
+class WithSizes b where
+  theWidth  :: b -> Int
+  theHeight :: b -> Int
 
+instance (Measurable (d a) b, WithSizes b, Semigroup (d a), Ord b, Poset b) =>
+         Semigroup (ODoc d a) where
+  MkDoc xs <> MkDoc ys = MkDoc $ \ w ->
+    bestsOn [ discardInvalid w [ x <> y | y <- ys w ]
+            | x <- xs w ]
+
+discardInvalid :: (Measurable (d a) b, WithSizes b) => Int -> [d a] -> [d a]
+discardInvalid w = quasifilter (fits w . measure)
+
+quasifilter :: (Measurable (d a) b, WithSizes b) =>
+               (d a -> Bool) -> [d a] -> [d a]
 quasifilter _ [] = []
 quasifilter p zs = let fzs = filter p zs
-                   in if null fzs -- in case that there are no valid layouts, we take a narrow one.
-                      then [minimumBy (compare `on` (maxWidth . frst)) zs]
-                      else fzs
+                     in if null fzs -- in case that there are no valid layouts, we take a narrow one.
+                        then [minimumBy (compare `on` (theWidth . measure)) zs]
+                        else fzs
 
-instance Monoid a => Monoid (ODoc a) where
+instance ( Measurable (d a) b, WithSizes b
+         , Semigroup (d a), Monoid a
+         , Ord b, Poset b
+         , Layout d
+         ) => Monoid (ODoc d a) where
   mempty = text ""
   mappend = (<>)
 
-fits :: Int -> M a -> Bool
-fits w x = maxWidth x <= w
+fits :: WithSizes b => Int -> b -> Bool
+fits w x = theWidth x <= w
 
-instance Layout ODoc where
-  text s = MkDoc $ \_ -> [text s]
+instance Layout d => Layout (ODoc d) where
+  text s = MkDoc $ \_ -> pure (text s)
   flush (MkDoc xs) = MkDoc $ \w -> fmap flush (xs w)
   annotate a (MkDoc xs) = MkDoc $ \w -> fmap (annotate a) (xs w)
 
-renderWith :: (Monoid r, Annotation a)
-           => Options a r  -- ^ rendering options
-           -> ODoc a          -- ^ renderable
-           -> r
-renderWith opts d = case xs of
-    [] -> error "No suitable layout found."
-    ((_ :-: x):_) -> renderWithL opts x
-  where
-    pageWidth = optsPageWidth opts
-    xs = discardInvalid pageWidth (fromDoc d pageWidth)
+class Layout d => Renderable d a where
+  renderWith :: (Monoid r, Annotation a) => Options a r -> d a -> r
 
-onlySingleLine :: [Pair M L a] -> [Pair M L a]
-onlySingleLine = takeWhile (\(M{..} :-: _) -> height == 0)
+instance (Measurable (d a) b, WithSizes b, Renderable d a) =>
+         Renderable (ODoc d) a where
+  renderWith opts d = case xs of
+    []    -> error "No suitable layout found."
+    (x:_) -> renderWith opts x
+
+    where
+      pageWidth = optsPageWidth opts
+      xs = discardInvalid pageWidth (fromDoc d pageWidth)
+
+instance Renderable L a where
+  renderWith = renderWithL
+
+instance Renderable (Pair M L) a where
+  renderWith opts = renderWith opts . scnd
+
+instance Renderable LM a where
+  renderWith opts = renderWithL opts . L . _block
+
+onlySingleLine :: (Measurable a b, WithSizes b) => [a] -> [a]
+onlySingleLine = takeWhile (\ x -> theHeight (measure x) == 0)
 
 spaces :: (Monoid a,Layout l) => Int -> l a
 spaces n = text $ replicate n ' '
@@ -205,7 +280,21 @@ a $$ b = flush a <> b
 
 second f (a,b) = (a, f b)
 
-groupingBy :: Monoid a => String -> [(Int,Doc a)] -> Doc a
+instance WithSizes (M a) where
+  theWidth  = maxWidth
+  theHeight = height
+
+instance Measurable (Pair M L a) (M a) where
+  measure = frst
+
+instance WithSizes (LM a) where
+  theWidth  = _maxWidth
+  theHeight = _height
+
+instance Measurable (LM a) (LM a) where
+  measure = id
+
+groupingBy :: Document d a b => String -> [(Int,ODoc d a)] -> ODoc d a
 groupingBy _ [] = mempty
 groupingBy separator ms = MkDoc $ \w ->
   let mws = map (second (($ w) . fromDoc)) ms
@@ -213,8 +302,8 @@ groupingBy separator ms = MkDoc $ \w ->
       hcatElems = map (onlySingleLine . snd) (init mws) ++ [lastMw] -- all the elements except the first must fit on a single line
       vcatElems = map (\(indent,x) -> map (spaces indent <>) x) mws
       horizontal = discardInvalid w $ foldr1 (liftA2 (\x y -> x <> text separator <> y)) hcatElems
-      vertical = foldr1 (\xs ys -> bestsOn frst [[x $$ y | y <- ys] | x <- xs]) vcatElems
-  in bestsOn frst [horizontal,vertical]
+      vertical = foldr1 (\xs ys -> bestsOn [[x $$ y | y <- ys] | x <- xs]) vcatElems
+  in bestsOn [horizontal,vertical]
 
 data Pair f g a = (:-:) {frst :: f a, scnd :: g a}
 
@@ -233,7 +322,7 @@ instance Monoid a => IsString (Doc a) where
   fromString = text
 
 type Annotation a = (Monoid a)
-type Doc = ODoc
+type Doc a = ODoc (Pair M L) a
 
 -- tt :: Doc ()
 -- tt = groupingBy " " $ map (4,) $ 
@@ -244,3 +333,13 @@ type Doc = ODoc
 -- >>> import Text.PrettyPrint.Compact
 -- >>> import Data.Monoid
 -- >>> import Data.Char
+
+
+class ( Layout d, Measurable (d a) b, WithSizes b
+      , Semigroup (d a), Monoid a
+      , Ord b, Poset b
+      ) => Document d a b
+      | d a -> b
+
+instance (Monoid a, Ord a) => Document (Pair M L) a (M a)
+instance (Monoid a, Ord a) => Document LM a (LM a)
