@@ -40,7 +40,7 @@ import Control.Applicative (liftA2)
 -- invariant that there aren't two consequtive non-annotated segments;
 -- yet there is no performance reason to do so.
 --
-data AS a = AS !Int [(a, String)]
+data AS a = AS {-# UNPACK #-} !Int [(a, String)]
   deriving (Eq,Ord,Show,Functor,Foldable,Traversable)
 
 -- | Tests the invariants of 'AS'
@@ -123,11 +123,11 @@ class Layout d where
   annotate :: forall a. Monoid a => a -> d a -> d a
 
 -- type parameter is phantom.
-data M a = M {height    :: Int,
-              lastWidth :: Int,
-              maxWidth  :: Int
-              }
-  deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
+data M a = M
+  { height    :: !Int
+  , lastWidth :: !Int
+  , maxWidth  :: !Int
+  } deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
 
 data Tree a = Leaf | Node !(Tree a) a !(Tree a)
   deriving (Show,Eq,Ord,Functor,Foldable,Traversable)
